@@ -107,6 +107,12 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 		return ErrInvalidSender
 	}
 	if isOlivetum {
+		nextFork := false
+		if fork := params.GetEconomyForkBlock(); fork.Sign() > 0 && head.Number != nil {
+			next := new(big.Int).Add(head.Number, big.NewInt(1))
+			nextFork = next.Cmp(fork) >= 0
+		}
+
 		if tx.To() == nil {
 			return core.ErrContractCreationDisabled
 		}
@@ -116,13 +122,12 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 		if to := tx.To(); to != nil && !core.IsAuthorizedManagementTx(sender, *to) {
 			return ErrManagementUnauthorized
 		}
-		if tx.Value().Sign() >= 0 && tx.Value().Cmp(params.GetMinTxAmount()) < 0 {
-			nextFork := false
-			if fork := params.GetEconomyForkBlock(); fork.Sign() > 0 && head.Number != nil {
-				next := new(big.Int).Add(head.Number, big.NewInt(1))
-				nextFork = next.Cmp(fork) >= 0
+		if to := tx.To(); to != nil {
+			if err := core.ValidateOlivetumTxPayload(sender, *to, tx.Value(), tx.Data(), tx.AccessList(), nextFork); err != nil {
+				return err
 			}
-
+		}
+		if tx.Value().Sign() >= 0 && tx.Value().Cmp(params.GetMinTxAmount()) < 0 {
 			var exemptFrom, exemptTo bool
 			if nextFork {
 				exemptFrom = params.IsMinTxAmountExemptSender(sender)

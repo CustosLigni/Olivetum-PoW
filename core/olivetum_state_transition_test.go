@@ -162,11 +162,91 @@ func TestStateTransitionAllowsZeroValueToDividendContractAfterFork(t *testing.T)
 		GasFeeCap: big.NewInt(1),
 		GasTipCap: big.NewInt(1),
 		Nonce:     0,
-		Data:      []byte{0x01, 0x02},
 	}
 	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
 	if err != nil {
 		t.Fatalf("expected zero-value dividend tx allowed after fork, got %v", err)
+	}
+}
+
+func TestStateTransitionRejectsCalldataForRegularTransfersAfterFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	from := common.HexToAddress("0x2")
+	to := common.HexToAddress("0x3")
+	msg := fundedMessage(from, &to, etherBig(10))
+	msg.GasLimit = 22000
+	msg.Data = []byte{0x01}
+	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
+	if err != ErrTxDataNotAllowed {
+		t.Fatalf("expected ErrTxDataNotAllowed, got %v", err)
+	}
+}
+
+func TestStateTransitionRejectsAccessListAfterFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	from := common.HexToAddress("0x2")
+	to := common.HexToAddress("0x3")
+	msg := fundedMessage(from, &to, etherBig(10))
+	msg.AccessList = types.AccessList{
+		{Address: common.HexToAddress("0x9"), StorageKeys: []common.Hash{common.HexToHash("0x01")}},
+	}
+	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
+	if err != ErrTxAccessListNotAllowed {
+		t.Fatalf("expected ErrTxAccessListNotAllowed, got %v", err)
+	}
+}
+
+func TestStateTransitionRejectsDividendClaimWithCalldataAfterFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	from := common.HexToAddress("0x2")
+	target := DividendContract
+	msg := Message{
+		From:      from,
+		To:        &target,
+		Value:     new(big.Int),
+		GasLimit:  22000,
+		GasPrice:  big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		GasTipCap: big.NewInt(1),
+		Nonce:     0,
+		Data:      []byte{0x01, 0x02},
+	}
+	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
+	if err != ErrTxDataNotAllowed {
+		t.Fatalf("expected ErrTxDataNotAllowed, got %v", err)
+	}
+}
+
+func TestStateTransitionRejectsManagementTxWithWrongDataLengthAfterFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	admin := params.MinTxAmountAdmin
+	target := params.MinTxAmountContract
+	msg := Message{
+		From:      admin,
+		To:        &target,
+		Value:     new(big.Int),
+		GasLimit:  30000,
+		GasPrice:  big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		GasTipCap: big.NewInt(1),
+		Nonce:     0,
+		Data:      []byte{0x01},
+	}
+	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
+	if err != ErrTxDataLengthInvalid {
+		t.Fatalf("expected ErrTxDataLengthInvalid, got %v", err)
 	}
 }
 

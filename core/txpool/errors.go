@@ -83,6 +83,11 @@ var (
 	// originates from a non-administrator account.
 	ErrManagementUnauthorized = corepkg.ErrUnauthorizedManagementTx
 
+	ErrTxDataNotAllowed       = corepkg.ErrTxDataNotAllowed
+	ErrTxDataLengthInvalid    = corepkg.ErrTxDataLengthInvalid
+	ErrTxAccessListNotAllowed = corepkg.ErrTxAccessListNotAllowed
+	ErrTxValueNotAllowed      = corepkg.ErrTxValueNotAllowed
+
 	// ErrDividendNotEligible is returned if a dividend claim transaction is not
 	// eligible at the current time (no active round, outside window, or already claimed).
 	ErrDividendNotEligible = errors.New("dividend claim not eligible")

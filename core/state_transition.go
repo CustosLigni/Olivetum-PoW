@@ -452,6 +452,11 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	var blockTimestamp uint64
 	if isOlivetum {
 		blockTimestamp = uint64(st.evm.Context.Time)
+		if msg.To != nil {
+			if err := ValidateOlivetumTxPayload(msg.From, *msg.To, msg.Value, msg.Data, msg.AccessList, isEconomyForkActive(st.evm.Context.BlockNumber)); err != nil {
+				return nil, err
+			}
+		}
 
 		if msg.Value.Sign() >= 0 {
 			min := params.GetMinTxAmount()
