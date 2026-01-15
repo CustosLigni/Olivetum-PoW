@@ -307,6 +307,7 @@ func (o *Olivetumhash) Prepare(chain consensus.ChainHeaderReader, header *types.
 
 // Finalize applies block rewards.
 func (o *Olivetumhash) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal) {
+	core.ApplyEconomyBaseline(state, header.Number)
 	accumulateRewards(state, header)
 }
 

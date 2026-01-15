@@ -33,6 +33,8 @@ build/_vendor/pkg
 /build/bin/
 /build/static/
 /geth*.zip
+/.gocache/
+/.gomodcache/
 
 # travis
 profile.tmp

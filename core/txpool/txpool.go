@@ -455,15 +455,67 @@ func (p *TxPool) applyOlivetumGuards(tx *types.Transaction, from common.Address,
 	if head == nil {
 		return errors.New("txpool head unavailable")
 	}
+	if err := p.applyOffSessionBudget(tx, from, head); err != nil {
+		return err
+	}
 	if to != nil && *to == core.DividendContract {
 		if err := p.checkDividendTx(tx, from, head); err != nil {
 			return err
 		}
 	}
-	if p.shouldSkipRateLimit(from, to) {
+	if p.shouldSkipRateLimit(tx, from, head) {
 		return nil
 	}
 	return p.applyTxRateLimit(from, head, admitted)
+}
+
+func (p *TxPool) applyOffSessionBudget(tx *types.Transaction, from common.Address, head *types.Header) error {
+	if tx.Value().Sign() == 0 || head == nil || head.Number == nil {
+		return nil
+	}
+	if core.IsSession(head.Time) {
+		return nil
+	}
+	fork := params.GetEconomyForkBlock()
+	if fork.Sign() == 0 {
+		return nil
+	}
+	nextBlock := new(big.Int).Add(head.Number, big.NewInt(1))
+	if nextBlock.Cmp(fork) < 0 {
+		return nil
+	}
+
+	p.stateLock.RLock()
+	state := p.state
+	p.stateLock.RUnlock()
+	if state == nil {
+		return errors.New("txpool state unavailable")
+	}
+
+	limit := params.GetOffSessionMaxPerTx()
+	if limit.Sign() == 0 {
+		return nil
+	}
+
+	total := core.GetOffSessionBudgetSpent(state, from, head.Time)
+	for _, subpool := range p.subpools {
+		pending, queued := subpool.ContentFrom(from)
+		for _, tx := range pending {
+			if tx.Value().Sign() > 0 {
+				total.Add(total, tx.Value())
+			}
+		}
+		for _, tx := range queued {
+			if tx.Value().Sign() > 0 {
+				total.Add(total, tx.Value())
+			}
+		}
+	}
+	total.Add(total, tx.Value())
+	if total.Cmp(limit) > 0 {
+		return ErrOverMaxOffSessionBudget
+	}
+	return nil
 }
 
 func (p *TxPool) checkDividendTx(tx *types.Transaction, from common.Address, head *types.Header) error {
@@ -497,9 +549,6 @@ func (p *TxPool) checkDividendTx(tx *types.Transaction, from common.Address, hea
 }
 
 func (p *TxPool) applyTxRateLimit(from common.Address, head *types.Header, admitted *common.Address) error {
-	if from == params.TxRateLimitAdmin {
-		return nil
-	}
 	now := head.Time
 	p.stateLock.RLock()
 	state := p.state
@@ -566,22 +615,22 @@ func (p *TxPool) poolNonce(addr common.Address) uint64 {
 	return nonce
 }
 
-func (p *TxPool) shouldSkipRateLimit(from common.Address, to *common.Address) bool {
+func (p *TxPool) shouldSkipRateLimit(tx *types.Transaction, from common.Address, head *types.Header) bool {
+	to := tx.To()
 	if to == nil {
 		return false
 	}
-	switch {
-	case from == params.TxRateLimitAdmin && *to == params.TxRateLimitContract:
-		return true
-	case from == params.OffSessionAdmin && *to == params.OffSessionTxRateContract:
-		return true
-	case from == params.OffSessionAdmin && *to == params.OffSessionMaxPerTxContract:
-		return true
-	case from == params.SessionTzAdmin && *to == params.SessionTzContract:
-		return true
-	default:
-		return false
+	fork := params.GetEconomyForkBlock()
+	if fork.Sign() == 0 {
+		return from == params.TxRateLimitAdmin
 	}
+	if head != nil && head.Number != nil {
+		nextBlock := new(big.Int).Add(head.Number, big.NewInt(1))
+		if nextBlock.Cmp(fork) < 0 && from == params.TxRateLimitAdmin {
+			return true
+		}
+	}
+	return core.IsTxRateLimitExempt(from, *to, tx.Data())
 }
 
 // Pending retrieves all currently processable transactions, grouped by origin

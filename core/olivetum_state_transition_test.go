@@ -137,3 +137,140 @@ func TestStateTransitionBlocksUnauthorizedManagementTx(t *testing.T) {
 		t.Fatalf("expected ErrUnauthorizedManagementTx, got %v", err)
 	}
 }
+
+func TestStateTransitionRateLimitsAdminTransfersAfterFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	oldLimit := params.GetTxRateLimit()
+	t.Cleanup(func() { params.SetTxRateLimit(oldLimit) })
+	params.SetTxRateLimit(1)
+
+	admin := params.TxRateLimitAdmin
+	to := common.HexToAddress("0x100")
+	ts := uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix())
+
+	evm, statedb, gp := newOlivetumEnv(t, ts)
+	fundAccount(statedb, admin, etherBig(1000))
+
+	usage := GetTxRateUsage(statedb, admin)
+	usage.Count = params.GetTxRateLimit()
+	usage.Start = ts
+	usage.Epoch = GetTxRateEpoch(statedb)
+	SetTxRateUsage(statedb, admin, usage)
+
+	msg := fundedMessage(admin, &to, etherBig(1))
+	st := NewStateTransition(evm, &msg, gp)
+	if _, err := st.TransitionDb(); err == nil || err.Error() != ErrRateLimit.Error() {
+		t.Fatalf("expected ErrRateLimit, got %v", err)
+	}
+
+	target := params.TxRateLimitContract
+	adminMsg := Message{
+		From:      admin,
+		To:        &target,
+		Value:     new(big.Int),
+		GasLimit:  30000,
+		GasPrice:  big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		GasTipCap: big.NewInt(1),
+		Nonce:     0,
+		Data:      []byte{0x01},
+	}
+	st2 := NewStateTransition(evm, &adminMsg, gp)
+	if _, err := st2.TransitionDb(); err != nil {
+		t.Fatalf("admin management tx failed: %v", err)
+	}
+}
+
+func TestStateTransitionDoesNotRateLimitAdminBeforeFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(10))
+
+	oldLimit := params.GetTxRateLimit()
+	t.Cleanup(func() { params.SetTxRateLimit(oldLimit) })
+	params.SetTxRateLimit(1)
+
+	admin := params.TxRateLimitAdmin
+	to := common.HexToAddress("0x101")
+	ts := uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix())
+
+	evm, statedb, gp := newOlivetumEnv(t, ts)
+	fundAccount(statedb, admin, etherBig(1000))
+
+	usage := GetTxRateUsage(statedb, admin)
+	usage.Count = params.GetTxRateLimit()
+	usage.Start = ts
+	usage.Epoch = GetTxRateEpoch(statedb)
+	SetTxRateUsage(statedb, admin, usage)
+
+	msg := fundedMessage(admin, &to, etherBig(1))
+	st := NewStateTransition(evm, &msg, gp)
+	if _, err := st.TransitionDb(); err != nil {
+		t.Fatalf("expected admin transfer acceptance before fork, got %v", err)
+	}
+}
+
+func TestStateTransitionAdminCanTriggerAndClaimDividendWithRateLimitOne(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	oldLimit := params.GetTxRateLimit()
+	t.Cleanup(func() { params.SetTxRateLimit(oldLimit) })
+	params.SetTxRateLimit(1)
+
+	prevDividend := currentDividend
+	t.Cleanup(func() { currentDividend = prevDividend })
+
+	admin := params.TxRateLimitAdmin
+	ts := uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix())
+
+	evm, statedb, gp := newOlivetumEnv(t, ts)
+	fundAccount(statedb, admin, etherBig(1000))
+
+	target := DividendContract
+	triggerMsg := Message{
+		From:      admin,
+		To:        &target,
+		Value:     new(big.Int),
+		GasLimit:  30000,
+		GasPrice:  big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		GasTipCap: big.NewInt(1),
+		Nonce:     0,
+		Data:      []byte{0x00},
+	}
+	st := NewStateTransition(evm, &triggerMsg, gp)
+	if _, err := st.TransitionDb(); err != nil {
+		t.Fatalf("trigger dividend failed: %v", err)
+	}
+
+	if usage := GetTxRateUsage(statedb, admin); usage.Count != 0 {
+		t.Fatalf("expected trigger tx to be exempt from rate limit, got count=%d", usage.Count)
+	}
+
+	claimMsg := Message{
+		From:      admin,
+		To:        &target,
+		Value:     new(big.Int),
+		GasLimit:  30000,
+		GasPrice:  big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		GasTipCap: big.NewInt(1),
+		Nonce:     1,
+	}
+	st2 := NewStateTransition(evm, &claimMsg, gp)
+	if _, err := st2.TransitionDb(); err != nil {
+		t.Fatalf("claim dividend failed: %v", err)
+	}
+
+	if usage := GetTxRateUsage(statedb, admin); usage.Count != 1 {
+		t.Fatalf("expected claim tx to consume one rate-limit slot, got count=%d", usage.Count)
+	}
+	if status := GetDividendStatus(statedb, admin); !status.Claimed {
+		t.Fatalf("expected dividend to be marked claimed for admin")
+	}
+}

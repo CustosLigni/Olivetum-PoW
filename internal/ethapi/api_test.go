@@ -430,11 +430,13 @@ func newTestAccountManager(t *testing.T) (*accounts.Manager, accounts.Account) {
 }
 
 type testBackend struct {
-	db      ethdb.Database
-	chain   *core.BlockChain
-	pending *types.Block
-	accman  *accounts.Manager
-	acc     accounts.Account
+	db            ethdb.Database
+	chain         *core.BlockChain
+	pending       *types.Block
+	accman        *accounts.Manager
+	acc           accounts.Account
+	txpoolPending map[common.Address][]*types.Transaction
+	txpoolQueued  map[common.Address][]*types.Transaction
 }
 
 func newTestBackend(t *testing.T, n int, gspec *genesisT.Genesis, engine consensus.Engine, generator func(i int, b *core.BlockGen)) *testBackend {
@@ -461,11 +463,18 @@ func newTestBackend(t *testing.T, n int, gspec *genesisT.Genesis, engine consens
 	}
 
 	backend := &testBackend{db: db, chain: chain, accman: accman, acc: acc}
+	backend.txpoolPending = make(map[common.Address][]*types.Transaction)
+	backend.txpoolQueued = make(map[common.Address][]*types.Transaction)
 	return backend
 }
 
 func (b *testBackend) setPendingBlock(block *types.Block) {
 	b.pending = block
+}
+
+func (b *testBackend) setTxPoolContentFrom(addr common.Address, pending, queued []*types.Transaction) {
+	b.txpoolPending[addr] = pending
+	b.txpoolQueued[addr] = queued
 }
 
 func (b testBackend) SyncProgress() ethereum.SyncProgress { return ethereum.SyncProgress{} }
@@ -603,7 +612,7 @@ func (b testBackend) TxPoolContent() (map[common.Address][]*types.Transaction, m
 	panic("implement me")
 }
 func (b testBackend) TxPoolContentFrom(addr common.Address) ([]*types.Transaction, []*types.Transaction) {
-	panic("implement me")
+	return b.txpoolPending[addr], b.txpoolQueued[addr]
 }
 func (b testBackend) SubscribeNewTxsEvent(events chan<- core.NewTxsEvent) event.Subscription {
 	panic("implement me")

@@ -33,6 +33,7 @@ type OlivetumSupply struct {
 	DividendRate uint64       `json:"dividendRate"`
 	Burned       *hexutil.Big `json:"burned"`
 	Dividends    *hexutil.Big `json:"dividendsMinted"`
+	NetBurned    *hexutil.Big `json:"netBurnedAfterDividends"`
 }
 
 // OlivetumAPI exposes chain-specific helper RPCs (read-only, non-consensus).
@@ -87,14 +88,21 @@ func (api *OlivetumAPI) GetSupply(ctx context.Context) (*OlivetumSupply, error) 
 	if remaining.Sign() < 0 {
 		remaining = new(big.Int)
 	}
+	burned := core.GetTotalBurned(state)
+	dividends := core.GetTotalDividendsMinted(state)
+	netBurned := new(big.Int).Sub(new(big.Int).Set(burned), dividends)
+	if netBurned.Sign() < 0 {
+		netBurned = new(big.Int)
+	}
 	return &OlivetumSupply{
 		TotalMinted:  (*hexutil.Big)(totalMinted),
 		MaxSupply:    (*hexutil.Big)(maxSupply),
 		Remaining:    (*hexutil.Big)(remaining),
 		BurnRate:     core.GetBurnRate(state),
 		DividendRate: core.GetDividendRate(state),
-		Burned:       (*hexutil.Big)(big.NewInt(0)), // not tracked on-chain
-		Dividends:    (*hexutil.Big)(big.NewInt(0)), // not tracked on-chain
+		Burned:       (*hexutil.Big)(burned),
+		Dividends:    (*hexutil.Big)(dividends),
+		NetBurned:    (*hexutil.Big)(netBurned),
 	}, nil
 }
 

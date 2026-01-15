@@ -469,29 +469,35 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 			if msg.Value.Cmp(maxPerTx) > 0 {
 				return nil, ErrOverMaxOffSession
 			}
+			if msg.Value.Sign() > 0 && isEconomyForkActive(st.evm.Context.BlockNumber) {
+				if err := UpdateOffSessionBudget(st.state, msg.From, msg.Value, blockTimestamp); err != nil {
+					return nil, err
+				}
+			}
 		}
 
-		if msg.From != params.TxRateLimitAdmin {
-			if !(msg.To != nil &&
-				((msg.From == params.TxRateLimitAdmin && *msg.To == params.TxRateLimitContract) ||
-					(msg.From == params.OffSessionAdmin && *msg.To == params.OffSessionTxRateContract) ||
-					(msg.From == params.OffSessionAdmin && *msg.To == params.OffSessionMaxPerTxContract) ||
-					(msg.From == params.SessionTzAdmin && *msg.To == params.SessionTzContract))) {
-				epoch := loadTxRateEpoch(st.state)
-				usage := GetTxRateUsage(st.state, msg.From)
-				if usage.Epoch != epoch || blockTimestamp-usage.Start >= uint64(time.Hour/time.Second) {
-					usage = TxRateUsage{Start: blockTimestamp, Epoch: epoch}
-				}
-				limit := params.GetTxRateLimit()
-				if !IsSession(blockTimestamp) {
-					limit = params.GetOffSessionTxRate()
-				}
-				if usage.Count >= limit {
-					return nil, ErrRateLimit
-				}
-				usage.Count++
-				SetTxRateUsage(st.state, msg.From, usage)
+		skipRateLimit := false
+		if msg.To != nil && IsTxRateLimitExempt(msg.From, *msg.To, msg.Data) {
+			skipRateLimit = true
+		}
+		if msg.From == params.TxRateLimitAdmin && !isEconomyForkActive(st.evm.Context.BlockNumber) {
+			skipRateLimit = true
+		}
+		if !skipRateLimit {
+			epoch := loadTxRateEpoch(st.state)
+			usage := GetTxRateUsage(st.state, msg.From)
+			if usage.Epoch != epoch || blockTimestamp-usage.Start >= uint64(time.Hour/time.Second) {
+				usage = TxRateUsage{Start: blockTimestamp, Epoch: epoch}
 			}
+			limit := params.GetTxRateLimit()
+			if !IsSession(blockTimestamp) {
+				limit = params.GetOffSessionTxRate()
+			}
+			if usage.Count >= limit {
+				return nil, ErrRateLimit
+			}
+			usage.Count++
+			SetTxRateUsage(st.state, msg.From, usage)
 		}
 	}
 
@@ -523,17 +529,27 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 			if burn.Sign() > 0 {
 				burnU256, _ := uint256.FromBig(burn)
 				st.state.SubBalance(msg.From, burnU256)
+				burnedNet := new(big.Int).Set(burn)
+				minerShare := new(big.Int)
 				shareActive := true
 				if fork := params.GetBurnShareForkBlock(); fork != nil && fork.Sign() > 0 && st.evm.Context.BlockNumber != nil {
 					shareActive = st.evm.Context.BlockNumber.Cmp(fork) >= 0
 				}
 				if shareActive {
-					minerShare := new(big.Int).Mul(burn, big.NewInt(int64(MinerBurnShareBps)))
+					minerShare.Mul(burn, big.NewInt(int64(MinerBurnShareBps)))
 					minerShare.Div(minerShare, big.NewInt(10000))
 					if minerShare.Sign() > 0 {
 						minerShareU256, _ := uint256.FromBig(minerShare)
 						st.state.AddBalance(st.evm.Context.Coinbase, minerShareU256)
 						AddHolding(st.state, st.evm.Context.Coinbase, minerShare, blockTimestamp)
+						burnedNet.Sub(burnedNet, minerShare)
+					}
+				}
+				if burnedNet.Sign() > 0 && isEconomyForkActive(st.evm.Context.BlockNumber) {
+					AddTotalBurned(st.state, burnedNet)
+					AddTotalBurnedTransfers(st.state, burnedNet)
+					if minerShare.Sign() > 0 {
+						AddTotalMinerBurnShare(st.state, minerShare)
 					}
 				}
 				value.Sub(value, burnU256)
@@ -596,8 +612,12 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 						}
 					}
 				} else if len(msg.Data) == 0 {
-					if !ClaimDividend(st.state, msg.From, blockTimestamp) {
+					reward, ok := ClaimDividend(st.state, msg.From, blockTimestamp)
+					if !ok {
 						vmerr = vm.ErrExecutionReverted
+					} else if isEconomyForkActive(st.evm.Context.BlockNumber) {
+						AddTotalDividendsMinted(st.state, reward)
+						MintDividendClaimTip(st.state, st.evm.Context.Coinbase, reward, blockTimestamp)
 					}
 				}
 			}
@@ -688,6 +708,38 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	} else {
 		fee := new(uint256.Int).SetUint64(st.gasUsed())
 		fee.Mul(fee, effectiveTipU256)
+		if isOlivetum && fee.Sign() > 0 && isEconomyForkActive(st.evm.Context.BlockNumber) {
+			burnRate := GetBurnRate(st.state)
+			if burnRate > 0 {
+				feeBig := fee.ToBig()
+				burn := new(big.Int).Mul(feeBig, new(big.Int).SetUint64(burnRate))
+				burn.Div(burn, big.NewInt(10000))
+				if burn.Sign() > 0 {
+					burnedNet := new(big.Int).Set(burn)
+					minerShare := new(big.Int)
+					shareActive := true
+					if fork := params.GetBurnShareForkBlock(); fork != nil && fork.Sign() > 0 && st.evm.Context.BlockNumber != nil {
+						shareActive = st.evm.Context.BlockNumber.Cmp(fork) >= 0
+					}
+					if shareActive {
+						minerShare.Mul(burn, big.NewInt(int64(MinerBurnShareBps)))
+						minerShare.Div(minerShare, big.NewInt(10000))
+						if minerShare.Sign() > 0 {
+							burnedNet.Sub(burnedNet, minerShare)
+						}
+					}
+					if burnedNet.Sign() > 0 {
+						AddTotalBurned(st.state, burnedNet)
+						AddTotalBurnedGas(st.state, burnedNet)
+						if minerShare.Sign() > 0 {
+							AddTotalMinerBurnShare(st.state, minerShare)
+						}
+						feeBig.Sub(feeBig, burnedNet)
+						fee = uint256.MustFromBig(feeBig)
+					}
+				}
+			}
+		}
 		st.state.AddBalance(st.evm.Context.Coinbase, fee)
 		if isOlivetum {
 			AddHolding(st.state, st.evm.Context.Coinbase, fee.ToBig(), blockTimestamp)
@@ -730,4 +782,9 @@ func (st *StateTransition) gasUsed() uint64 {
 // blobGasUsed returns the amount of blob gas used by the message.
 func (st *StateTransition) blobGasUsed() uint64 {
 	return uint64(len(st.msg.BlobHashes) * vars.BlobTxBlobGasPerBlob)
+}
+
+func isEconomyForkActive(blockNumber *big.Int) bool {
+	fork := params.GetEconomyForkBlock()
+	return fork.Sign() > 0 && blockNumber != nil && blockNumber.Cmp(fork) >= 0
 }

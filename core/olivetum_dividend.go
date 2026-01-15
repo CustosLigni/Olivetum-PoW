@@ -397,37 +397,37 @@ func GetDividendView(s vm.StateDB, addr common.Address, now uint64) DividendView
 	}
 }
 
-func ClaimDividend(s vm.StateDB, addr common.Address, now uint64) bool {
+func ClaimDividend(s vm.StateDB, addr common.Address, now uint64) (*big.Int, bool) {
 	ensureDividendAccount(s)
 	bootstrapHolding(s, addr)
 	matureRecent(s, addr, now)
 	real := uint64(time.Now().Unix())
 	if now > real+maxTimestampDrift {
-		return false
+		return nil, false
 	}
 	rate := getRoundRate(s)
 	if rate == 0 {
-		return false
+		return nil, false
 	}
 	start := getRoundStart(s)
 	if now < start || now-start > claimWindow {
-		return false
+		return nil, false
 	}
 	if now-getHoldingTime(s, addr) < dividendQualify {
-		return false
+		return nil, false
 	}
 	roundID := getRoundID(s)
 	if getClaimedRound(s, addr) == roundID {
-		return false
+		return nil, false
 	}
 	held := getHeldAmount(s, addr)
 	if held.Sign() == 0 {
-		return false
+		return nil, false
 	}
 	reward := new(big.Int).Mul(held, big.NewInt(int64(rate)))
 	reward.Div(reward, big.NewInt(10000))
 	if reward.Sign() == 0 {
-		return false
+		return nil, false
 	}
 	s.AddBalance(addr, uint256.MustFromBig(reward))
 
@@ -444,7 +444,7 @@ func ClaimDividend(s vm.StateDB, addr common.Address, now uint64) bool {
 	})
 
 	setClaimedRound(s, addr, roundID)
-	return true
+	return reward, true
 }
 
 func TriggerDividend(s vm.StateDB, now uint64) bool {

@@ -66,7 +66,6 @@ type EthereumAPI struct {
 	b Backend
 }
 
-// TxLimits describes current transfer limits for UI gating.
 type TxLimits struct {
 	Session     bool           `json:"session"`
 	TxRemaining hexutil.Uint64 `json:"txRemaining"`
@@ -74,7 +73,6 @@ type TxLimits struct {
 	MaxPerTx    *hexutil.Big   `json:"maxPerTx,omitempty"`
 }
 
-// DividendStatus describes the parameters of the current dividend round.
 type DividendStatus struct {
 	Rate    hexutil.Uint64 `json:"rate"`
 	Start   hexutil.Uint64 `json:"start"`
@@ -83,10 +81,37 @@ type DividendStatus struct {
 	Claimed bool           `json:"claimed"`
 }
 
-// DividendView describes the split between already-eligible and pending holdings.
 type DividendView struct {
 	EligibleNow *hexutil.Big `json:"eligibleNow"`
 	Pending     *hexutil.Big `json:"pending"`
+}
+
+type OffSessionBudget struct {
+	Session        bool           `json:"session"`
+	Enforced       bool           `json:"enforced"`
+	Limit          *hexutil.Big   `json:"limit"`
+	SpentConfirmed *hexutil.Big   `json:"spentConfirmed"`
+	SpentPending   *hexutil.Big   `json:"spentPending"`
+	SpentTotal     *hexutil.Big   `json:"spentTotal"`
+	Remaining      *hexutil.Big   `json:"remaining"`
+	WindowStart    hexutil.Uint64 `json:"windowStart"`
+	WindowEnd      hexutil.Uint64 `json:"windowEnd"`
+	ResetIn        hexutil.Uint64 `json:"resetIn"`
+}
+
+type EconomyStats struct {
+	TotalMinted             *hexutil.Big `json:"totalMinted"`
+	MaxSupply               *hexutil.Big `json:"maxSupply"`
+	Remaining               *hexutil.Big `json:"remaining"`
+	BurnRate                uint64       `json:"burnRate"`
+	DividendRate            uint64       `json:"dividendRate"`
+	Burned                  *hexutil.Big `json:"burned"`
+	BurnedTransfers         *hexutil.Big `json:"burnedTransfers"`
+	BurnedGas               *hexutil.Big `json:"burnedGas"`
+	MinerBurnShare          *hexutil.Big `json:"minerBurnShare"`
+	GrossBurnCharged        *hexutil.Big `json:"grossBurnCharged"`
+	DividendsMinted         *hexutil.Big `json:"dividendsMinted"`
+	NetBurnedAfterDividends *hexutil.Big `json:"netBurnedAfterDividends"`
 }
 
 // NewEthereumAPI creates a new Ethereum protocol API.
@@ -115,8 +140,6 @@ func (s *EthereumAPI) MaxPriorityFeePerGas(ctx context.Context) (*hexutil.Big, e
 	return (*hexutil.Big)(tipcap), err
 }
 
-// GetTxAllowance returns the remaining number of transactions the given address
-// may submit within the current rate limit window.
 func (s *EthereumAPI) GetTxAllowance(ctx context.Context, addr common.Address) (hexutil.Uint64, error) {
 	state, header, err := s.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
 	if err != nil {
@@ -126,8 +149,6 @@ func (s *EthereumAPI) GetTxAllowance(ctx context.Context, addr common.Address) (
 	return hexutil.Uint64(allowance), nil
 }
 
-// GetTxLimits returns whether the market session is open, remaining tx/h, and
-// applicable min/max per-transaction amounts at the latest head.
 func (s *EthereumAPI) GetTxLimits(ctx context.Context, addr common.Address) (*TxLimits, error) {
 	state, header, err := s.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
 	if err != nil {
@@ -149,8 +170,6 @@ func (s *EthereumAPI) GetTxLimits(ctx context.Context, addr common.Address) (*Tx
 	}, nil
 }
 
-// GetTxUsage returns the raw limiter usage (count, start, epoch) for debugging
-// and operations.
 func (s *EthereumAPI) GetTxUsage(ctx context.Context, addr common.Address) (map[string]hexutil.Uint64, error) {
 	state, header, err := s.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
 	if err != nil {
@@ -171,8 +190,6 @@ func (s *EthereumAPI) GetTxUsage(ctx context.Context, addr common.Address) (map[
 	return resp, nil
 }
 
-// GetDividendStatus returns information about the current dividend round along
-// with whether the specified account has already claimed.
 func (s *EthereumAPI) GetDividendStatus(ctx context.Context, address common.Address) (*DividendStatus, error) {
 	state, _, err := s.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
 	if err != nil {
@@ -188,7 +205,6 @@ func (s *EthereumAPI) GetDividendStatus(ctx context.Context, address common.Addr
 	}, nil
 }
 
-// GetDividendView returns the eligible and pending holdings for the given address at the latest head.
 func (s *EthereumAPI) GetDividendView(ctx context.Context, address common.Address) (*DividendView, error) {
 	state, header, err := s.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
 	if err != nil {
@@ -198,6 +214,145 @@ func (s *EthereumAPI) GetDividendView(ctx context.Context, address common.Addres
 	return &DividendView{
 		EligibleNow: (*hexutil.Big)(view.EligibleNow),
 		Pending:     (*hexutil.Big)(view.Pending),
+	}, nil
+}
+
+func offSessionBudgetWindowRange(ts uint64) (uint64, uint64) {
+	off := int64(params.GetSessionTzOffsetSeconds())
+	local := int64(ts) + off
+	if local < 0 {
+		return 0, 0
+	}
+	t := time.Unix(local, 0).UTC()
+	if t.Weekday() != time.Sunday && t.Hour() >= 12 && t.Hour() < 24 {
+		return 0, 0
+	}
+
+	day := int64(24 * time.Hour / time.Second)
+	startLocal := (local / day) * day
+	if t.Weekday() == time.Monday && t.Hour() < 12 {
+		startLocal -= day
+		if startLocal < 0 {
+			startLocal = 0
+		}
+	}
+
+	windowLen := int64(12 * time.Hour / time.Second)
+	if time.Unix(startLocal, 0).UTC().Weekday() == time.Sunday {
+		windowLen = int64(36 * time.Hour / time.Second)
+	}
+	endLocal := startLocal + windowLen
+
+	startUTC := startLocal - off
+	endUTC := endLocal - off
+	if startUTC < 0 {
+		startUTC = 0
+	}
+	if endUTC < 0 {
+		endUTC = 0
+	}
+	return uint64(startUTC), uint64(endUTC)
+}
+
+func (s *EthereumAPI) GetOffSessionBudget(ctx context.Context, address common.Address) (*OffSessionBudget, error) {
+	state, header, err := s.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
+	if err != nil {
+		return nil, err
+	}
+	now := header.Time
+	session := core.IsSession(now)
+
+	fork := params.GetEconomyForkBlock()
+	enforced := false
+	if fork.Sign() > 0 && header.Number != nil {
+		next := new(big.Int).Add(header.Number, big.NewInt(1))
+		enforced = next.Cmp(fork) >= 0 && !session
+	}
+
+	limit := params.GetOffSessionMaxPerTx()
+	spentConfirmed := core.GetOffSessionBudgetSpent(state, address, now)
+
+	spentPending := new(big.Int)
+	pending, queued := s.b.TxPoolContentFrom(address)
+	for _, tx := range pending {
+		if tx.Value().Sign() > 0 {
+			spentPending.Add(spentPending, tx.Value())
+		}
+	}
+	for _, tx := range queued {
+		if tx.Value().Sign() > 0 {
+			spentPending.Add(spentPending, tx.Value())
+		}
+	}
+
+	spentTotal := new(big.Int).Add(new(big.Int).Set(spentConfirmed), spentPending)
+	remaining := new(big.Int)
+	if limit.Sign() > 0 {
+		remaining.Sub(limit, spentTotal)
+		if remaining.Sign() < 0 {
+			remaining = new(big.Int)
+		}
+	}
+
+	var windowStart, windowEnd uint64
+	if !session {
+		windowStart, windowEnd = offSessionBudgetWindowRange(now)
+	}
+	var resetIn uint64
+	if windowEnd > 0 && now < windowEnd {
+		resetIn = windowEnd - now
+	}
+	return &OffSessionBudget{
+		Session:        session,
+		Enforced:       enforced,
+		Limit:          (*hexutil.Big)(limit),
+		SpentConfirmed: (*hexutil.Big)(spentConfirmed),
+		SpentPending:   (*hexutil.Big)(spentPending),
+		SpentTotal:     (*hexutil.Big)(spentTotal),
+		Remaining:      (*hexutil.Big)(remaining),
+		WindowStart:    hexutil.Uint64(windowStart),
+		WindowEnd:      hexutil.Uint64(windowEnd),
+		ResetIn:        hexutil.Uint64(resetIn),
+	}, nil
+}
+
+func (s *EthereumAPI) GetEconomyStats(ctx context.Context) (*EconomyStats, error) {
+	state, _, err := s.b.StateAndHeaderByNumber(ctx, rpc.LatestBlockNumber)
+	if err != nil {
+		return nil, err
+	}
+	totalMinted := core.GetTotalMinted(state)
+	maxSupply := params.MaxSupply()
+	remaining := new(big.Int).Sub(maxSupply, totalMinted)
+	if remaining.Sign() < 0 {
+		remaining = new(big.Int)
+	}
+
+	burned := core.GetTotalBurned(state)
+	burnedTransfers := core.GetTotalBurnedTransfers(state)
+	burnedGas := core.GetTotalBurnedGas(state)
+	minerShare := core.GetTotalMinerBurnShare(state)
+	grossBurnCharged := new(big.Int).Add(new(big.Int).Set(burned), minerShare)
+
+	dividends := core.GetTotalDividendsMinted(state)
+	netBurned := new(big.Int).Sub(new(big.Int).Set(burned), dividends)
+	if netBurned.Sign() < 0 {
+		netBurned = new(big.Int)
+	}
+
+	return &EconomyStats{
+		TotalMinted:             (*hexutil.Big)(totalMinted),
+		MaxSupply:               (*hexutil.Big)(maxSupply),
+		Remaining:               (*hexutil.Big)(remaining),
+		BurnRate:                core.GetBurnRate(state),
+		DividendRate:            core.GetDividendRate(state),
+		Burned:                  (*hexutil.Big)(burned),
+		BurnedTransfers:         (*hexutil.Big)(burnedTransfers),
+		BurnedGas:               (*hexutil.Big)(burnedGas),
+		MinerBurnShare:          (*hexutil.Big)(minerShare),
+		GrossBurnCharged:        (*hexutil.Big)(grossBurnCharged),
+		DividendsMinted:         (*hexutil.Big)(dividends),
+		NetBurnedAfterDividends: (*hexutil.Big)(netBurned),
 	}, nil
 }
 

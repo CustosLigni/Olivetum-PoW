@@ -1,7 +1,6 @@
 package core
 
 import (
-	"math"
 	"math/big"
 	"time"
 
@@ -65,9 +64,6 @@ func ClearTxRateUsage(s vm.StateDB, addr common.Address) {
 }
 
 func GetTxAllowance(s vm.StateDB, addr common.Address, now uint64) uint64 {
-	if addr == params.TxRateLimitAdmin {
-		return math.MaxUint64
-	}
 	limit := params.GetTxRateLimit()
 	if !IsSession(now) {
 		limit = params.GetOffSessionTxRate()
@@ -81,6 +77,29 @@ func GetTxAllowance(s vm.StateDB, addr common.Address, now uint64) uint64 {
 		return 0
 	}
 	return limit - u.Count
+}
+
+func IsTxRateLimitExempt(from common.Address, to common.Address, data []byte) bool {
+	switch to {
+	case BurnContract:
+		return from == BurnAdmin
+	case DividendContract:
+		return from == DividendAdmin && len(data) == 1
+	case params.GasLimitContract:
+		return from == params.GasLimitAdmin
+	case params.PeriodContract:
+		return from == params.PeriodAdmin
+	case params.MinTxAmountContract:
+		return from == params.MinTxAmountAdmin
+	case params.TxRateLimitContract:
+		return from == params.TxRateLimitAdmin
+	case params.OffSessionTxRateContract, params.OffSessionMaxPerTxContract:
+		return from == params.OffSessionAdmin
+	case params.SessionTzContract:
+		return from == params.SessionTzAdmin
+	default:
+		return false
+	}
 }
 
 func ResetTxRateUsage(s vm.StateDB) {

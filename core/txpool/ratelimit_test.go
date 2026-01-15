@@ -3,6 +3,7 @@ package txpool
 import (
 	"math"
 	"math/big"
+	"sort"
 	"testing"
 	"time"
 
@@ -21,10 +22,16 @@ import (
 type dummySubPool struct {
 	seen      map[common.Hash]bool
 	nextNonce uint64
+	signer    types.Signer
+	content   map[common.Address]map[uint64]*types.Transaction
 }
 
-func newDummySubPool() *dummySubPool {
-	return &dummySubPool{seen: make(map[common.Hash]bool)}
+func newDummySubPool(signer types.Signer) *dummySubPool {
+	return &dummySubPool{
+		seen:    make(map[common.Hash]bool),
+		signer:  signer,
+		content: make(map[common.Address]map[uint64]*types.Transaction),
+	}
 }
 
 func (d *dummySubPool) Filter(tx *types.Transaction) bool { return true }
@@ -52,6 +59,17 @@ func (d *dummySubPool) Add(txs []*types.Transaction, local bool, sync bool) []er
 			continue
 		}
 		d.seen[hash] = true
+		from, err := types.Sender(d.signer, tx)
+		if err != nil {
+			errs[i] = ErrInvalidSender
+			continue
+		}
+		byNonce := d.content[from]
+		if byNonce == nil {
+			byNonce = make(map[uint64]*types.Transaction)
+			d.content[from] = byNonce
+		}
+		byNonce[tx.Nonce()] = tx
 		if n := tx.Nonce() + 1; n > d.nextNonce {
 			d.nextNonce = n
 		}
@@ -73,10 +91,6 @@ func (d *dummySubPool) Nonce(common.Address) uint64 { return d.nextNonce }
 func (d *dummySubPool) Stats() (int, int) { return 0, 0 }
 
 func (d *dummySubPool) Content() (map[common.Address][]*types.Transaction, map[common.Address][]*types.Transaction) {
-	return nil, nil
-}
-
-func (d *dummySubPool) ContentFrom(common.Address) ([]*types.Transaction, []*types.Transaction) {
 	return nil, nil
 }
 
@@ -128,7 +142,8 @@ func newTestPool(t *testing.T) (*TxPool, *dummyChain, *state.StateDB, types.Sign
 		config: newOlivetumConfig(t),
 		state:  statedb,
 	}
-	sub := newDummySubPool()
+	signer := types.LatestSigner(chain.config)
+	sub := newDummySubPool(signer)
 	pool, err := New(0, chain, []SubPool{sub})
 	if err != nil {
 		t.Fatalf("new txpool: %v", err)
@@ -136,7 +151,24 @@ func newTestPool(t *testing.T) (*TxPool, *dummyChain, *state.StateDB, types.Sign
 	t.Cleanup(func() {
 		_ = pool.Close()
 	})
-	return pool, chain, statedb, types.LatestSigner(chain.config)
+	return pool, chain, statedb, signer
+}
+
+func (d *dummySubPool) ContentFrom(addr common.Address) ([]*types.Transaction, []*types.Transaction) {
+	byNonce := d.content[addr]
+	if len(byNonce) == 0 {
+		return nil, nil
+	}
+	nonces := make([]uint64, 0, len(byNonce))
+	for nonce := range byNonce {
+		nonces = append(nonces, nonce)
+	}
+	sort.Slice(nonces, func(i, j int) bool { return nonces[i] < nonces[j] })
+	pending := make([]*types.Transaction, 0, len(nonces))
+	for _, nonce := range nonces {
+		pending = append(pending, byNonce[nonce])
+	}
+	return pending, nil
 }
 
 func configureRuntime(t *testing.T, statedb *state.StateDB, limit uint64) {
@@ -212,9 +244,13 @@ func TestTxPoolRateLimitIgnoresDuplicates(t *testing.T) {
 	}
 }
 
-func TestTxPoolRateLimitExemptsAdmin(t *testing.T) {
+func TestTxPoolRateLimitAppliesToAdminTransfersAfterFork(t *testing.T) {
 	pool, chain, statedb, signer := newTestPool(t)
 	configureRuntime(t, statedb, 2)
+
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
 
 	originalAdmin := params.TxRateLimitAdmin
 	t.Cleanup(func() { params.TxRateLimitAdmin = originalAdmin })
@@ -223,23 +259,23 @@ func TestTxPoolRateLimitExemptsAdmin(t *testing.T) {
 	admin := crypto.PubkeyToAddress(key.PublicKey)
 	params.TxRateLimitAdmin = admin
 
-	chain.head.Time = 300
+	chain.head.Time = uint64(12 * 3600)
 	usage := core.GetTxRateUsage(statedb, admin)
 	usage.Count = params.GetTxRateLimit()
 	usage.Start = chain.head.Time
 	usage.Epoch = core.GetTxRateEpoch(statedb)
 	core.SetTxRateUsage(statedb, admin, usage)
 
-	toContract := params.TxRateLimitContract
-	adminTx := types.MustSignNewTx(key, signer, &types.LegacyTx{Nonce: 0, To: &toContract, Value: big.NewInt(0), Gas: 21000, GasPrice: big.NewInt(0)})
-	if err := pool.Add([]*types.Transaction{adminTx}, true, true)[0]; err != nil {
-		t.Fatalf("admin management tx rejected: %v", err)
+	to := common.HexToAddress("0x0000000000000000000000000000000000000002")
+	tx := types.MustSignNewTx(key, signer, &types.LegacyTx{Nonce: 0, To: &to, Value: big.NewInt(1), Gas: 21000, GasPrice: big.NewInt(0)})
+	if err := pool.Add([]*types.Transaction{tx}, true, true)[0]; err != ErrRateLimit {
+		t.Fatalf("expected ErrRateLimit, got %v", err)
 	}
 
-	to := common.HexToAddress("0x0000000000000000000000000000000000000002")
-	tx := types.MustSignNewTx(key, signer, &types.LegacyTx{Nonce: 1, To: &to, Value: big.NewInt(1), Gas: 21000, GasPrice: big.NewInt(0)})
-	if err := pool.Add([]*types.Transaction{tx}, true, true)[0]; err != nil {
-		t.Fatalf("admin transfer rejected: %v", err)
+	toContract := params.TxRateLimitContract
+	adminTx := types.MustSignNewTx(key, signer, &types.LegacyTx{Nonce: 0, To: &toContract, Value: big.NewInt(0), Gas: 21000, GasPrice: big.NewInt(0), Data: []byte{0x02}})
+	if err := pool.Add([]*types.Transaction{adminTx}, true, true)[0]; err != nil {
+		t.Fatalf("admin management tx rejected: %v", err)
 	}
 }
 

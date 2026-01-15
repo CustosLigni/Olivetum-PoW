@@ -77,6 +77,8 @@ var (
 	// per-transaction maximum during off-session periods.
 	ErrOverMaxAmount = corepkg.ErrOverMaxOffSession
 
+	ErrOverMaxOffSessionBudget = corepkg.ErrOverMaxOffSessionBudget
+
 	// ErrManagementUnauthorized is returned if a management contract transaction
 	// originates from a non-administrator account.
 	ErrManagementUnauthorized = corepkg.ErrUnauthorizedManagementTx

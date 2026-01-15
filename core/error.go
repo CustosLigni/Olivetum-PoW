@@ -117,4 +117,5 @@ var (
 	ErrUnauthorizedManagementTx = errors.New("management transaction requires administrator")
 	ErrRateLimit                = errors.New("transaction rate limit exceeded")
 	ErrOverMaxOffSession        = errors.New("transaction value exceeds off-session per-tx maximum")
+	ErrOverMaxOffSessionBudget  = errors.New("transaction value exceeds off-session budget")
 )
