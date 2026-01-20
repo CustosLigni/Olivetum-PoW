@@ -117,8 +117,20 @@ func ValidateTransaction(tx *types.Transaction, head *types.Header, signer types
 			return ErrManagementUnauthorized
 		}
 		if tx.Value().Sign() >= 0 && tx.Value().Cmp(params.GetMinTxAmount()) < 0 {
-			exemptFrom := params.IsMinTxAmountExempt(sender)
-			exemptTo := tx.To() != nil && params.IsMinTxAmountExempt(*tx.To())
+			nextFork := false
+			if fork := params.GetEconomyForkBlock(); fork.Sign() > 0 && head.Number != nil {
+				next := new(big.Int).Add(head.Number, big.NewInt(1))
+				nextFork = next.Cmp(fork) >= 0
+			}
+
+			var exemptFrom, exemptTo bool
+			if nextFork {
+				exemptFrom = params.IsMinTxAmountExemptSender(sender)
+				exemptTo = tx.To() != nil && params.IsMinTxAmountExemptRecipient(*tx.To())
+			} else {
+				exemptFrom = params.IsMinTxAmountExempt(sender)
+				exemptTo = tx.To() != nil && params.IsMinTxAmountExempt(*tx.To())
+			}
 			if !exemptFrom && !exemptTo {
 				return ErrUnderMinAmount
 			}

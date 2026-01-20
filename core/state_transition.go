@@ -456,8 +456,14 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		if msg.Value.Sign() >= 0 {
 			min := params.GetMinTxAmount()
 			if msg.Value.Cmp(min) < 0 {
-				exemptFrom := params.IsMinTxAmountExempt(msg.From)
-				exemptTo := msg.To != nil && params.IsMinTxAmountExempt(*msg.To)
+				var exemptFrom, exemptTo bool
+				if isEconomyForkActive(st.evm.Context.BlockNumber) {
+					exemptFrom = params.IsMinTxAmountExemptSender(msg.From)
+					exemptTo = msg.To != nil && params.IsMinTxAmountExemptRecipient(*msg.To)
+				} else {
+					exemptFrom = params.IsMinTxAmountExempt(msg.From)
+					exemptTo = msg.To != nil && params.IsMinTxAmountExempt(*msg.To)
+				}
 				if !exemptFrom && !exemptTo {
 					return nil, fmt.Errorf("transaction value below minimum")
 				}

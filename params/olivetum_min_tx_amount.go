@@ -24,6 +24,12 @@ var (
 		MinTxAmountAdmin: {},
 		DividendAddress:  {},
 	}
+	minTxAmountExemptSender = map[common.Address]struct{}{
+		MinTxAmountAdmin: {},
+	}
+	minTxAmountExemptRecipient = map[common.Address]struct{}{
+		DividendAddress: {},
+	}
 )
 
 func GetMinTxAmount() *big.Int {
@@ -48,5 +54,15 @@ func DecodeMinTxAmount(data []byte) (*big.Int, bool) {
 
 func IsMinTxAmountExempt(addr common.Address) bool {
 	_, ok := minTxAmountExempt[addr]
+	return ok
+}
+
+func IsMinTxAmountExemptSender(addr common.Address) bool {
+	_, ok := minTxAmountExemptSender[addr]
+	return ok
+}
+
+func IsMinTxAmountExemptRecipient(addr common.Address) bool {
+	_, ok := minTxAmountExemptRecipient[addr]
 	return ok
 }

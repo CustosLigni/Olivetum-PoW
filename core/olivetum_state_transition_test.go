@@ -106,6 +106,70 @@ func TestStateTransitionEnforcesMinimumAmount(t *testing.T) {
 	}
 }
 
+func TestStateTransitionAllowsUnderMinToAdminBeforeFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(10))
+
+	oldMin := params.GetMinTxAmount()
+	t.Cleanup(func() { params.SetMinTxAmount(oldMin) })
+	params.SetMinTxAmount(etherBig(10))
+
+	from := common.HexToAddress("0x2")
+	to := params.MinTxAmountAdmin
+	msg := fundedMessage(from, &to, etherBig(5))
+	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
+	if err != nil {
+		t.Fatalf("expected under-min to admin accepted before fork, got %v", err)
+	}
+}
+
+func TestStateTransitionRejectsUnderMinToAdminAfterFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	oldMin := params.GetMinTxAmount()
+	t.Cleanup(func() { params.SetMinTxAmount(oldMin) })
+	params.SetMinTxAmount(etherBig(10))
+
+	from := common.HexToAddress("0x2")
+	to := params.MinTxAmountAdmin
+	msg := fundedMessage(from, &to, etherBig(5))
+	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
+	if err == nil || err.Error() != "transaction value below minimum" {
+		t.Fatalf("expected minimum amount error, got %v", err)
+	}
+}
+
+func TestStateTransitionAllowsZeroValueToDividendContractAfterFork(t *testing.T) {
+	oldFork := params.GetEconomyForkBlock()
+	t.Cleanup(func() { params.SetEconomyForkBlock(oldFork) })
+	params.SetEconomyForkBlock(big.NewInt(1))
+
+	oldMin := params.GetMinTxAmount()
+	t.Cleanup(func() { params.SetMinTxAmount(oldMin) })
+	params.SetMinTxAmount(etherBig(10))
+
+	from := common.HexToAddress("0x2")
+	target := DividendContract
+	msg := Message{
+		From:      from,
+		To:        &target,
+		Value:     new(big.Int),
+		GasLimit:  22000,
+		GasPrice:  big.NewInt(1),
+		GasFeeCap: big.NewInt(1),
+		GasTipCap: big.NewInt(1),
+		Nonce:     0,
+		Data:      []byte{0x01, 0x02},
+	}
+	err := runTx(t, uint64(time.Date(2024, time.March, 4, 13, 0, 0, 0, time.UTC).Unix()), msg)
+	if err != nil {
+		t.Fatalf("expected zero-value dividend tx allowed after fork, got %v", err)
+	}
+}
+
 func TestStateTransitionEnforcesOffSessionCap(t *testing.T) {
 	oldCap := params.GetOffSessionMaxPerTx()
 	t.Cleanup(func() { params.SetOffSessionMaxPerTx(oldCap) })
